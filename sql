@@ -167,6 +167,50 @@ ORDER BY
         WHEN 'DELETE' THEN ISNULL(w.Deletes, 0)
     END DESC;
 
+==============================================================
+
+
+USE YourDatabaseName;
+GO
+
+SELECT TOP (50)
+    SCHEMA_NAME(t.schema_id) AS SchemaName,
+    t.name AS TableName,
+    i.name AS IndexName,
+
+    ISNULL(s.user_seeks, 0) AS IndexSeeks,
+    ISNULL(s.user_scans, 0) AS IndexScans,
+    ISNULL(s.user_lookups, 0) AS IndexLookups,
+
+    ISNULL(s.user_seeks, 0)
+      + ISNULL(s.user_scans, 0)
+      + ISNULL(s.user_lookups, 0) AS TotalReads,
+
+    ISNULL(s.user_updates, 0) AS TotalWrites,
+
+    s.last_user_seek AS LastSeek,
+    s.last_user_scan AS LastScan,
+    s.last_user_update AS LastWrite
+
+FROM sys.tables t
+
+INNER JOIN sys.indexes i
+    ON t.object_id = i.object_id
+
+LEFT JOIN sys.dm_db_index_usage_stats s
+    ON s.object_id = i.object_id
+    AND s.index_id = i.index_id
+    AND s.database_id = DB_ID()
+
+WHERE i.type = 2
+  AND i.is_primary_key = 0
+  AND i.is_unique_constraint = 0
+  AND i.is_unique = 0
+  AND t.is_ms_shipped = 0
+
+ORDER BY
+    ISNULL(s.user_updates, 0) DESC,
+    TotalReads ASC;
 
 
 
