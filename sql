@@ -213,6 +213,164 @@ ORDER BY
     TotalReads ASC;
 
 
+=============================================================================================
+
+
+USE YourDatabaseName;
+GO
+
+DECLARE @SchemaName SYSNAME = N'dbo';
+DECLARE @TableName SYSNAME = N'BT_ACT_TASKCATEGORYITEMS';
+
+DECLARE @ObjectId INT =
+    OBJECT_ID(
+        QUOTENAME(@SchemaName) + N'.' +
+        QUOTENAME(@TableName),
+        'U'
+    );
+
+IF @ObjectId IS NULL
+BEGIN
+    PRINT 'Table not found. Check schema and table name.';
+    RETURN;
+END;
+
+;WITH IndexSize AS
+(
+    SELECT
+        object_id,
+        index_id,
+        SUM(used_page_count) * 8.0 / 1024
+            AS SizeMB,
+        SUM(row_count) AS IndexRows
+    FROM sys.dm_db_partition_stats
+    WHERE object_id = @ObjectId
+    GROUP BY object_id, index_id
+)
+SELECT
+    i.name AS IndexName,
+
+    STUFF((
+        SELECT ', ' + QUOTENAME(c.name) +
+               CASE
+                   WHEN ic.is_descending_key = 1
+                   THEN ' DESC'
+                   ELSE ' ASC'
+               END
+        FROM sys.index_columns ic
+        JOIN sys.columns c
+          ON ic.object_id = c.object_id
+         AND ic.column_id = c.column_id
+        WHERE ic.object_id = i.object_id
+          AND ic.index_id = i.index_id
+          AND ic.key_ordinal > 0
+        ORDER BY ic.key_ordinal
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
+        AS KeyColumns,
+
+    STUFF((
+        SELECT ', ' + QUOTENAME(c.name)
+        FROM sys.index_columns ic
+        JOIN sys.columns c
+          ON ic.object_id = c.object_id
+         AND ic.column_id = c.column_id
+        WHERE ic.object_id = i.object_id
+          AND ic.index_id = i.index_id
+          AND ic.is_included_column = 1
+        ORDER BY ic.index_column_id
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
+        AS IncludedColumns,
+
+    i.is_unique AS IsUnique,
+    i.has_filter AS HasFilter,
+    i.filter_definition AS FilterDefinition,
+    i.is_disabled AS IsDisabled,
+
+    CAST(sz.SizeMB AS DECIMAL(18,2)) AS IndexSizeMB,
+    sz.IndexRows,
+
+    ISNULL(s.user_seeks, 0) AS Seeks,
+    ISNULL(s.user_scans, 0) AS Scans,
+    ISNULL(s.user_lookups, 0) AS Lookups,
+
+    ISNULL(s.user_seeks, 0)
+      + ISNULL(s.user_scans, 0)
+      + ISNULL(s.user_lookups, 0) AS TotalReads,
+
+    ISNULL(s.user_updates, 0) AS TotalWrites,
+
+    s.last_user_seek AS LastSeek,
+    s.last_user_scan AS LastScan,
+    s.last_user_update AS LastWrite
+
+FROM sys.indexes i
+
+LEFT JOIN sys.dm_db_index_usage_stats s
+  ON s.object_id = i.object_id
+ AND s.index_id = i.index_id
+ AND s.database_id = DB_ID()
+
+LEFT JOIN IndexSize sz
+  ON sz.object_id = i.object_id
+ AND sz.index_id = i.index_id
+
+WHERE i.object_id = @ObjectId
+  AND i.type = 2
+
+ORDER BY TotalWrites DESC, TotalReads ASC;
+
+
+
+=============================================================================================
+
+
+USE YourDatabaseName;
+GO
+
+DECLARE @ObjectId INT =
+    OBJECT_ID(N'dbo.BT_ACT_TASKCATEGORYITEMS', 'U');
+
+IF @ObjectId IS NULL
+BEGIN
+    PRINT 'Table not found.';
+    RETURN;
+END;
+
+SELECT
+    i.name AS IndexName,
+
+    SUM(os.leaf_insert_count) AS LeafInserts,
+    SUM(os.leaf_update_count) AS LeafUpdates,
+    SUM(os.leaf_delete_count) AS LeafDeletes,
+    SUM(os.leaf_ghost_count) AS GhostDeletes,
+
+    SUM(os.leaf_allocation_count) AS LeafPageAllocations,
+
+    SUM(os.page_latch_wait_count) AS PageLatchWaits,
+    SUM(os.page_latch_wait_in_ms) AS PageLatchWaitMs,
+
+    SUM(os.row_lock_wait_count) AS RowLockWaits,
+    SUM(os.row_lock_wait_in_ms) AS RowLockWaitMs
+
+FROM sys.dm_db_index_operational_stats(
+    DB_ID(), @ObjectId, NULL, NULL
+) os
+
+JOIN sys.indexes i
+  ON os.object_id = i.object_id
+ AND os.index_id = i.index_id
+
+WHERE os.object_id = @ObjectId
+  AND i.type = 2
+
+GROUP BY i.name
+
+ORDER BY PageLatchWaitMs DESC;
+
+
+
 
 
 
