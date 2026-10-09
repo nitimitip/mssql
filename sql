@@ -87,6 +87,85 @@ ORDER BY ImprovementScore DESC;
 
 
 
+=======================================================================
+
+
+USE YourDatabaseName;
+GO
+
+-- Options: READ, INSERT, UPDATE, DELETE
+DECLARE @SortBy VARCHAR(10) = 'READ';
+
+;WITH ReadActivity AS
+(
+    SELECT
+        object_id,
+        SUM(user_seeks) AS Seeks,
+        SUM(user_scans) AS Scans,
+        SUM(user_lookups) AS Lookups
+    FROM sys.dm_db_index_usage_stats
+    WHERE database_id = DB_ID()
+    GROUP BY object_id
+),
+WriteActivity AS
+(
+    SELECT
+        os.object_id,
+        SUM(os.leaf_insert_count) AS Inserts,
+        SUM(os.leaf_update_count) AS Updates,
+        SUM(
+            os.leaf_delete_count +
+            os.leaf_ghost_count
+        ) AS Deletes
+    FROM sys.dm_db_index_operational_stats(
+        DB_ID(), NULL, NULL, NULL
+    ) os
+    INNER JOIN sys.indexes i
+        ON os.object_id = i.object_id
+       AND os.index_id = i.index_id
+    WHERE i.type IN (0, 1)
+    GROUP BY os.object_id
+)
+SELECT TOP (30)
+    SCHEMA_NAME(t.schema_id) AS SchemaName,
+    t.name AS TableName,
+
+    ISNULL(r.Seeks, 0) +
+    ISNULL(r.Scans, 0) +
+    ISNULL(r.Lookups, 0) AS ReadOperations,
+
+    ISNULL(w.Inserts, 0) AS InsertOperations,
+    ISNULL(w.Updates, 0) AS UpdateOperations,
+    ISNULL(w.Deletes, 0) AS DeleteOperations,
+
+    ISNULL(r.Seeks, 0) AS IndexSeeks,
+    ISNULL(r.Scans, 0) AS IndexScans,
+    ISNULL(r.Lookups, 0) AS IndexLookups
+
+FROM sys.tables t
+LEFT JOIN ReadActivity r
+    ON t.object_id = r.object_id
+LEFT JOIN WriteActivity w
+    ON t.object_id = w.object_id
+
+WHERE t.is_memory_optimized = 0
+  AND EXISTS (
+      SELECT 1
+      FROM sys.indexes i
+      WHERE i.object_id = t.object_id
+        AND i.type IN (0, 1)
+  )
+
+ORDER BY
+    CASE @SortBy
+        WHEN 'READ' THEN
+            ISNULL(r.Seeks, 0) +
+            ISNULL(r.Scans, 0) +
+            ISNULL(r.Lookups, 0)
+        WHEN 'INSERT' THEN ISNULL(w.Inserts, 0)
+        WHEN 'UPDATE' THEN ISNULL(w.Updates, 0)
+        WHEN 'DELETE' THEN ISNULL(w.Deletes, 0)
+    END DESC;
 
 
 
