@@ -1,0 +1,418 @@
+
+--------------------------Find the most expensive stored procedures
+
+USE YourDatabaseName;
+GO
+
+SELECT TOP (20)
+    OBJECT_SCHEMA_NAME(
+        ps.object_id, ps.database_id
+    ) AS SchemaName,
+
+    OBJECT_NAME(
+        ps.object_id, ps.database_id
+    ) AS ProcedureName,
+
+    ps.execution_count AS ExecutionCount,
+
+    CAST(
+        ps.total_elapsed_time / 1000.0 /
+        NULLIF(ps.execution_count, 0)
+        AS DECIMAL(18,2)
+    ) AS AvgDurationMs,
+
+    CAST(
+        ps.total_elapsed_time / 1000.0
+        AS DECIMAL(18,2)
+    ) AS TotalDurationMs,
+
+    CAST(
+        ps.total_worker_time / 1000.0 /
+        NULLIF(ps.execution_count, 0)
+        AS DECIMAL(18,2)
+    ) AS AvgCpuMs,
+
+    ps.total_logical_reads /
+        NULLIF(ps.execution_count, 0)
+        AS AvgLogicalReads,
+
+    ps.last_execution_time AS LastExecuted
+
+FROM sys.dm_exec_procedure_stats ps
+
+WHERE ps.database_id = DB_ID()
+
+ORDER BY ps.total_elapsed_time DESC;
+
+
+
+
+
+
+
+---------------------------------------Use Query Store for historical analysis
+
+USE YourDatabaseName;
+GO
+
+SELECT
+    actual_state_desc,
+    desired_state_desc,
+    current_storage_size_mb,
+    max_storage_size_mb,
+    readonly_reason
+FROM sys.database_query_store_options;
+
+
+
+
+
+
+
+-------------------------------Identify what happens while the application is slow
+
+USE YourDatabaseName;
+GO
+
+SELECT TOP (30)
+    r.session_id,
+    r.status,
+    r.command,
+    r.blocking_session_id,
+
+    r.wait_type,
+    r.wait_time AS WaitMs,
+
+    r.cpu_time AS CpuMs,
+    r.logical_reads AS LogicalReads,
+    r.total_elapsed_time AS ElapsedMs,
+
+    SUBSTRING(
+        st.text,
+        (r.statement_start_offset / 2) + 1,
+        (
+            (
+                CASE
+                    WHEN r.statement_end_offset = -1
+                    THEN DATALENGTH(st.text)
+                    ELSE r.statement_end_offset
+                END - r.statement_start_offset
+            ) / 2
+        ) + 1
+    ) AS RunningStatement
+
+FROM sys.dm_exec_requests r
+
+OUTER APPLY sys.dm_exec_sql_text(
+    r.sql_handle
+) st
+
+WHERE r.session_id > 50
+  AND r.database_id = DB_ID()
+
+ORDER BY r.total_elapsed_time DESC;
+
+
+
+
+
+
+
+
+
+
+
+-------------------------Next query — Compare actual index definitions
+
+
+USE YourDatabaseName;
+GO
+
+SELECT
+    SCHEMA_NAME(t.schema_id) AS SchemaName,
+    t.name AS TableName,
+    i.name AS IndexName,
+    c.name AS ColumnName,
+
+    CASE
+        WHEN ic.is_included_column = 1
+            THEN 'INCLUDE'
+        ELSE 'KEY'
+    END AS ColumnType,
+
+    ic.key_ordinal AS KeyPosition,
+    ic.is_descending_key AS IsDescending,
+
+    i.is_unique AS IsUnique,
+    i.has_filter AS HasFilter,
+    i.filter_definition AS FilterDefinition,
+
+    ISNULL(s.user_seeks, 0)
+      + ISNULL(s.user_scans, 0)
+      + ISNULL(s.user_lookups, 0) AS TotalReads,
+
+    ISNULL(s.user_updates, 0) AS TotalWrites
+
+FROM sys.tables t
+
+JOIN sys.indexes i
+    ON t.object_id = i.object_id
+
+JOIN sys.index_columns ic
+    ON i.object_id = ic.object_id
+   AND i.index_id = ic.index_id
+
+JOIN sys.columns c
+    ON ic.object_id = c.object_id
+   AND ic.column_id = c.column_id
+
+LEFT JOIN sys.dm_db_index_usage_stats s
+    ON s.object_id = i.object_id
+   AND s.index_id = i.index_id
+   AND s.database_id = DB_ID()
+
+WHERE t.name IN (
+    'BT_ACT_HIST',
+    'BT_ACT_TASKCATEGORYITEMS',
+    'BT_CONTACTS_MASTER'
+)
+AND i.type = 2
+AND i.is_hypothetical = 0
+
+ORDER BY
+    t.name,
+    i.name,
+    ic.is_included_column,
+    ic.key_ordinal,
+    ic.index_column_id;
+
+
+
+---------------------Investigation A — Check index definitions and sizes
+
+
+USE YourDatabaseName;
+GO
+
+DECLARE @SchemaName SYSNAME = N'dbo';
+DECLARE @TableName SYSNAME = N'BT_ACT_TASKCATEGORYITEMS';
+
+DECLARE @ObjectId INT =
+    OBJECT_ID(
+        QUOTENAME(@SchemaName) + N'.' +
+        QUOTENAME(@TableName),
+        'U'
+    );
+
+IF @ObjectId IS NULL
+BEGIN
+    PRINT 'Table not found. Check schema and table name.';
+    RETURN;
+END;
+
+;WITH IndexSize AS
+(
+    SELECT
+        object_id,
+        index_id,
+        SUM(used_page_count) * 8.0 / 1024
+            AS SizeMB,
+        SUM(row_count) AS IndexRows
+    FROM sys.dm_db_partition_stats
+    WHERE object_id = @ObjectId
+    GROUP BY object_id, index_id
+)
+SELECT
+    i.name AS IndexName,
+
+    STUFF((
+        SELECT ', ' + QUOTENAME(c.name) +
+               CASE
+                   WHEN ic.is_descending_key = 1
+                   THEN ' DESC'
+                   ELSE ' ASC'
+               END
+        FROM sys.index_columns ic
+        JOIN sys.columns c
+          ON ic.object_id = c.object_id
+         AND ic.column_id = c.column_id
+        WHERE ic.object_id = i.object_id
+          AND ic.index_id = i.index_id
+          AND ic.key_ordinal > 0
+        ORDER BY ic.key_ordinal
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
+        AS KeyColumns,
+
+    STUFF((
+        SELECT ', ' + QUOTENAME(c.name)
+        FROM sys.index_columns ic
+        JOIN sys.columns c
+          ON ic.object_id = c.object_id
+         AND ic.column_id = c.column_id
+        WHERE ic.object_id = i.object_id
+          AND ic.index_id = i.index_id
+          AND ic.is_included_column = 1
+        ORDER BY ic.index_column_id
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
+        AS IncludedColumns,
+
+    i.is_unique AS IsUnique,
+    i.has_filter AS HasFilter,
+    i.filter_definition AS FilterDefinition,
+    i.is_disabled AS IsDisabled,
+
+    CAST(sz.SizeMB AS DECIMAL(18,2)) AS IndexSizeMB,
+    sz.IndexRows,
+
+    ISNULL(s.user_seeks, 0) AS Seeks,
+    ISNULL(s.user_scans, 0) AS Scans,
+    ISNULL(s.user_lookups, 0) AS Lookups,
+
+    ISNULL(s.user_seeks, 0)
+      + ISNULL(s.user_scans, 0)
+      + ISNULL(s.user_lookups, 0) AS TotalReads,
+
+    ISNULL(s.user_updates, 0) AS TotalWrites,
+
+    s.last_user_seek AS LastSeek,
+    s.last_user_scan AS LastScan,
+    s.last_user_update AS LastWrite
+
+FROM sys.indexes i
+
+LEFT JOIN sys.dm_db_index_usage_stats s
+  ON s.object_id = i.object_id
+ AND s.index_id = i.index_id
+ AND s.database_id = DB_ID()
+
+LEFT JOIN IndexSize sz
+  ON sz.object_id = i.object_id
+ AND sz.index_id = i.index_id
+
+WHERE i.object_id = @ObjectId
+  AND i.type = 2
+
+ORDER BY TotalWrites DESC, TotalReads ASC;
+
+
+
+
+
+
+
+
+
+-----------------------------------Investigation B — Check how much write activity and contention each index experiences
+
+
+USE YourDatabaseName;
+GO
+
+DECLARE @ObjectId INT =
+    OBJECT_ID(N'dbo.BT_ACT_TASKCATEGORYITEMS', 'U');
+
+IF @ObjectId IS NULL
+BEGIN
+    PRINT 'Table not found.';
+    RETURN;
+END;
+
+SELECT
+    i.name AS IndexName,
+
+    SUM(os.leaf_insert_count) AS LeafInserts,
+    SUM(os.leaf_update_count) AS LeafUpdates,
+    SUM(os.leaf_delete_count) AS LeafDeletes,
+    SUM(os.leaf_ghost_count) AS GhostDeletes,
+
+    SUM(os.leaf_allocation_count) AS LeafPageAllocations,
+
+    SUM(os.page_latch_wait_count) AS PageLatchWaits,
+    SUM(os.page_latch_wait_in_ms) AS PageLatchWaitMs,
+
+    SUM(os.row_lock_wait_count) AS RowLockWaits,
+    SUM(os.row_lock_wait_in_ms) AS RowLockWaitMs
+
+FROM sys.dm_db_index_operational_stats(
+    DB_ID(), @ObjectId, NULL, NULL
+) os
+
+JOIN sys.indexes i
+  ON os.object_id = i.object_id
+ AND os.index_id = i.index_id
+
+WHERE os.object_id = @ObjectId
+  AND i.type = 2
+
+GROUP BY i.name
+
+ORDER BY PageLatchWaitMs DESC;
+
+
+
+
+----------------Investigation C — Find stored procedures using the suspicious tables
+
+USE YourDatabaseName;
+GO
+
+SELECT
+    OBJECT_SCHEMA_NAME(o.object_id) AS SchemaName,
+    o.name AS ObjectName,
+    o.type_desc AS ObjectType
+
+FROM sys.sql_modules m
+
+JOIN sys.objects o
+    ON m.object_id = o.object_id
+
+WHERE m.definition LIKE '%BT_ACT_TASKCATEGORYITEMS%'
+
+ORDER BY o.type_desc, o.name;
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------SQL query — Check IIS-originated sessions
+
+
+SELECT
+    s.session_id,
+    s.host_name,
+    s.host_process_id,
+    s.program_name,
+    s.login_name,
+    s.status AS SessionStatus,
+    s.open_transaction_count,
+
+    s.last_request_start_time,
+    s.last_request_end_time,
+
+    r.status AS RequestStatus,
+    r.blocking_session_id,
+    r.wait_type,
+    r.wait_time AS WaitMs,
+    r.total_elapsed_time AS ElapsedMs
+
+FROM sys.dm_exec_sessions s
+
+LEFT JOIN sys.dm_exec_requests r
+    ON s.session_id = r.session_id
+
+WHERE s.is_user_process = 1
+  AND s.host_name = 'YOUR_IIS_SERVER'
+
+ORDER BY s.last_request_end_time DESC;
+
+
