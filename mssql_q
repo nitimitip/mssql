@@ -543,5 +543,98 @@ GROUP BY ws.wait_category_desc
 ORDER BY TotalWaitMs DESC;
 
 
+-------------------------------------when Query 31 experiences the highest waits
+
+
+USE YourDatabaseName;
+GO
+
+DECLARE @QueryId BIGINT = 31;
+DECLARE @HoursBack INT = 48;
+
+SELECT
+    CAST(rsi.start_time AS DATETIME2(0))
+        AS IntervalStart,
+
+    CAST(rsi.end_time AS DATETIME2(0))
+        AS IntervalEnd,
+
+    ws.wait_category_desc AS WaitCategory,
+
+    CAST(
+        SUM(ws.total_query_wait_time_ms) / 1000.0
+        AS DECIMAL(18,2)
+    ) AS TotalWaitSeconds
+
+FROM sys.query_store_wait_stats ws
+
+INNER JOIN sys.query_store_plan p
+    ON ws.plan_id = p.plan_id
+
+INNER JOIN sys.query_store_runtime_stats_interval rsi
+    ON ws.runtime_stats_interval_id =
+       rsi.runtime_stats_interval_id
+
+WHERE p.query_id = @QueryId
+  AND ws.execution_type = 0
+  AND rsi.end_time >
+      DATEADD(
+          HOUR,
+          -@HoursBack,
+          SYSDATETIMEOFFSET()
+      )
+
+GROUP BY
+    rsi.start_time,
+    rsi.end_time,
+    ws.wait_category_desc
+
+ORDER BY
+    IntervalStart DESC,
+    TotalWaitSeconds DESC;
+
+
+
+-------------------------------------------------Identify who is blocking SQL requests
+
+
+USE YourDatabaseName;
+GO
+
+SELECT
+    r.session_id AS BlockedSession,
+    r.blocking_session_id AS BlockingSession,
+
+    r.wait_type AS WaitType,
+    r.wait_time AS WaitMs,
+
+    r.total_elapsed_time AS ElapsedMs,
+
+    s.host_name AS BlockedHost,
+    s.program_name AS BlockedApplication,
+
+    bs.status AS BlockerStatus,
+    bs.open_transaction_count
+        AS BlockerOpenTransactions,
+
+    LEFT(st.text, 4000)
+        AS BlockedSQL
+
+FROM sys.dm_exec_requests r
+
+INNER JOIN sys.dm_exec_sessions s
+    ON r.session_id = s.session_id
+
+LEFT JOIN sys.dm_exec_sessions bs
+    ON r.blocking_session_id = bs.session_id
+
+OUTER APPLY sys.dm_exec_sql_text(
+    r.sql_handle
+) st
+
+WHERE r.blocking_session_id > 0
+  AND r.database_id = DB_ID()
+
+ORDER BY r.wait_time DESC;
 
 
