@@ -484,3 +484,64 @@ ORDER BY TotalDurationSeconds DESC;
 
 
 
+------------------------------check stat is stale
+
+USE YourDatabaseName;
+GO
+
+SELECT
+    s.name AS StatisticsName,
+
+    CASE
+        WHEN s.no_recompute = 1 THEN 'YES'
+        ELSE 'NO'
+    END AS AutoUpdateDisabled,
+
+    p.last_updated AS LastStatisticsUpdate,
+    p.rows AS RowsAtLastUpdate,
+    p.rows_sampled AS SampledRows,
+    p.modification_counter AS ModificationsSinceUpdate
+
+FROM sys.stats s
+
+OUTER APPLY sys.dm_db_stats_properties(
+    s.object_id,
+    s.stats_id
+) p
+
+WHERE s.object_id =
+    OBJECT_ID('dbo.BT_ENQUIRY_MASTER', 'U')
+
+ORDER BY
+    s.no_recompute DESC,
+    p.modification_counter DESC;
+
+
+
+--------------------------------query check slow
+
+
+USE YourDatabaseName;
+GO
+
+SELECT
+    ws.wait_category_desc AS WaitCategory,
+
+    SUM(ws.total_query_wait_time_ms)
+        AS TotalWaitMs
+
+FROM sys.query_store_wait_stats ws
+
+INNER JOIN sys.query_store_plan p
+    ON ws.plan_id = p.plan_id
+
+WHERE p.query_id = 31
+  AND ws.execution_type = 0
+
+GROUP BY ws.wait_category_desc
+
+ORDER BY TotalWaitMs DESC;
+
+
+
+
