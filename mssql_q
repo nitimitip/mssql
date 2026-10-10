@@ -638,3 +638,128 @@ WHERE r.blocking_session_id > 0
 ORDER BY r.wait_time DESC;
 
 
+-------------------------------------find correlation
+
+
+USE YourDatabaseName;
+GO
+
+DECLARE @QueryId BIGINT = 31;
+DECLARE @HoursBack INT = 48;
+
+;WITH RuntimeData AS
+(
+    SELECT
+        rs.runtime_stats_interval_id,
+
+        SUM(rs.count_executions) AS ExecutionCount,
+
+        SUM(
+            rs.avg_duration * 1.0 *
+            rs.count_executions
+        ) / NULLIF(SUM(rs.count_executions), 0)
+          / 1000.0 AS AvgDurationMs,
+
+        MAX(rs.max_duration) / 1000.0
+            AS MaxDurationMs,
+
+        SUM(
+            rs.avg_logical_io_reads * 1.0 *
+            rs.count_executions
+        ) / NULLIF(SUM(rs.count_executions), 0)
+            AS AvgLogicalReads
+
+    FROM sys.query_store_runtime_stats rs
+    JOIN sys.query_store_plan p
+      ON rs.plan_id = p.plan_id
+    JOIN sys.query_store_runtime_stats_interval ri
+      ON rs.runtime_stats_interval_id =
+         ri.runtime_stats_interval_id
+
+    WHERE p.query_id = @QueryId
+      AND rs.execution_type = 0
+      AND ri.end_time >= DATEADD(
+          HOUR, -@HoursBack, SYSDATETIMEOFFSET()
+      )
+
+    GROUP BY rs.runtime_stats_interval_id
+),
+WaitData AS
+(
+    SELECT
+        ws.runtime_stats_interval_id,
+
+        SUM(CASE
+            WHEN ws.wait_category_desc = 'CPU'
+            THEN ws.total_query_wait_time_ms
+            ELSE 0 END) AS CpuWaitMs,
+
+        SUM(CASE
+            WHEN ws.wait_category_desc = 'Lock'
+            THEN ws.total_query_wait_time_ms
+            ELSE 0 END) AS LockWaitMs,
+
+        SUM(CASE
+            WHEN ws.wait_category_desc = 'Buffer IO'
+            THEN ws.total_query_wait_time_ms
+            ELSE 0 END) AS BufferIOWaitMs
+
+    FROM sys.query_store_wait_stats ws
+    JOIN sys.query_store_plan p
+      ON ws.plan_id = p.plan_id
+    JOIN sys.query_store_runtime_stats_interval ri
+      ON ws.runtime_stats_interval_id =
+         ri.runtime_stats_interval_id
+
+    WHERE p.query_id = @QueryId
+      AND ws.execution_type = 0
+      AND ri.end_time >= DATEADD(
+          HOUR, -@HoursBack, SYSDATETIMEOFFSET()
+      )
+
+    GROUP BY ws.runtime_stats_interval_id
+)
+SELECT
+    ri.start_time AS IntervalStart,
+    ri.end_time AS IntervalEnd,
+
+    r.ExecutionCount,
+
+    CAST(r.AvgDurationMs AS DECIMAL(18,2))
+        AS AvgDurationMs,
+
+    CAST(r.MaxDurationMs AS DECIMAL(18,2))
+        AS MaxDurationMs,
+
+    CAST(r.AvgLogicalReads AS DECIMAL(18,2))
+        AS AvgLogicalReads,
+
+    CAST(ISNULL(w.CpuWaitMs, 0) / 1000.0
+        AS DECIMAL(18,2)) AS CpuWaitSeconds,
+
+    CAST(ISNULL(w.LockWaitMs, 0) / 1000.0
+        AS DECIMAL(18,2)) AS LockWaitSeconds,
+
+    CAST(ISNULL(w.BufferIOWaitMs, 0) / 1000.0
+        AS DECIMAL(18,2)) AS BufferIOWaitSeconds,
+
+    CAST(
+        ISNULL(w.LockWaitMs, 0) * 1.0 /
+        NULLIF(r.ExecutionCount, 0)
+        AS DECIMAL(18,2)
+    ) AS LockWaitMsPerExecution
+
+FROM RuntimeData r
+
+JOIN sys.query_store_runtime_stats_interval ri
+  ON r.runtime_stats_interval_id =
+     ri.runtime_stats_interval_id
+
+LEFT JOIN WaitData w
+  ON r.runtime_stats_interval_id =
+     w.runtime_stats_interval_id
+
+ORDER BY ri.start_time DESC;
+
+
+
