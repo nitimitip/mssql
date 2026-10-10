@@ -416,3 +416,71 @@ WHERE s.is_user_process = 1
 ORDER BY s.last_request_end_time DESC;
 
 
+
+-----------------------------------------query plan
+
+USE YourDatabaseName;
+GO
+
+DECLARE @QueryId BIGINT = 31;
+DECLARE @DaysBack INT = 7;
+
+SELECT
+    p.query_id,
+    p.plan_id,
+
+    SUM(rs.count_executions) AS ExecutionCount,
+
+    CAST(
+        SUM(rs.avg_duration * rs.count_executions)
+        / NULLIF(SUM(rs.count_executions), 0)
+        / 1000.0 AS DECIMAL(18,2)
+    ) AS AvgDurationMs,
+
+    CAST(
+        MAX(rs.max_duration) / 1000.0
+        AS DECIMAL(18,2)
+    ) AS MaxDurationMs,
+
+    CAST(
+        SUM(rs.avg_duration * rs.count_executions)
+        / 1000000.0 AS DECIMAL(18,2)
+    ) AS TotalDurationSeconds,
+
+    CAST(
+        SUM(rs.avg_cpu_time * rs.count_executions)
+        / NULLIF(SUM(rs.count_executions), 0)
+        / 1000.0 AS DECIMAL(18,2)
+    ) AS AvgCpuMs,
+
+    CAST(
+        SUM(rs.avg_logical_io_reads *
+            rs.count_executions)
+        / NULLIF(SUM(rs.count_executions), 0)
+        AS DECIMAL(18,2)
+    ) AS AvgLogicalReads,
+
+    MAX(rs.last_execution_time) AS LastExecuted
+
+FROM sys.query_store_plan p
+
+JOIN sys.query_store_runtime_stats rs
+    ON p.plan_id = rs.plan_id
+
+JOIN sys.query_store_runtime_stats_interval rsi
+    ON rs.runtime_stats_interval_id =
+       rsi.runtime_stats_interval_id
+
+WHERE p.query_id = @QueryId
+  AND rs.execution_type = 0
+  AND rsi.end_time >
+      DATEADD(DAY, -@DaysBack, SYSDATETIMEOFFSET())
+
+GROUP BY
+    p.query_id,
+    p.plan_id
+
+ORDER BY TotalDurationSeconds DESC;
+
+
+
